@@ -7,8 +7,5 @@ venv/
 # Fuse hidden files
 .fuse_hidden*
 
-# IPUMS data
-ipums_data/
-
 # Output maps
 output_maps/

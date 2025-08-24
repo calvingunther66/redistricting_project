@@ -1,0 +1,1 @@
+Our privacy policy is pretty simple. We don't collect any data (as of August 24th 2025). We are potentially going to implement the ability to send in logs for debugging, but logs will be just terminal level information, and shouldn't contain any personally identifing information.

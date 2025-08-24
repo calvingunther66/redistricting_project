@@ -18,7 +18,7 @@ import os
 # ---\
 # This is a generalized version of the redistricting analysis script.\
 # It now automatically detects population columns, repairs geometries,\
-# and correctly reprojects the data for accurate area calculations.\
+# correctly reprojects data, and handles geographic islands and single-district states.\
 # Example Usage:\
 # python3 analyze_maps.py --state CA --districts 52\
 # ---\
@@ -129,10 +129,18 @@ df['perimeter'] = df.geometry.length
 # Create the graph from the cleaned GeoDataFrame.
 graph = Graph.from_geodataframe(df, ignore_errors=True)
 
-# --- FIX: Manually assign attributes to the graph nodes for compatibility ---
-# This loop ensures that population, area, and perimeter data are correctly
-# attached to each node in the graph, which is required for the simulation.
-# This method is more robust across different versions of the gerrychain library.
+# Handle disconnected "islands" by working with the largest connected component
+if not nx.is_connected(graph):
+    print("WARNING: Graph is not connected. Using the largest connected component.")
+    largest_component = max(nx.connected_components(graph), key=len)
+    graph = graph.subgraph(largest_component).copy()
+    # After creating the subgraph, we need to re-index the dataframe to match
+    df = df.iloc[list(graph.nodes)].copy()
+    df.reset_index(drop=True, inplace=True)
+    graph = nx.relabel_nodes(graph, {old_label: new_label for new_label, old_label in enumerate(graph.nodes())})
+
+
+# Manually assign attributes to the graph nodes for compatibility
 for node in graph.nodes:
     graph.nodes[node][POPULATION_COLUMN] = df[POPULATION_COLUMN][node]
     graph.nodes[node]["area"] = df["area"][node]
@@ -157,108 +165,104 @@ updaters = {
 total_population = df[POPULATION_COLUMN].sum()
 ideal_population = total_population / NUM_DISTRICTS
 
-# Create the initial partition using a simple recursive method
-initial_partition = Partition(
-    graph,
-    assignment=recursive_tree_part(graph, range(NUM_DISTRICTS), ideal_population, POPULATION_COLUMN, 0.01),
-    updaters=updaters
-)
+# Handle single-district states and create a more robust initial partition
+if NUM_DISTRICTS == 1:
+    print("State has only one district. Skipping simulation.")
+    # Assign all nodes to district 0
+    assignment = {node: 0 for node in graph.nodes}
+    best_partition = Partition(graph, assignment, updaters)
+else:
+    # For multi-district states, create the initial partition using a recursive method.
+    # We use a slightly higher epsilon (5%) for the *initial* partition to make it
+    # more robust for complex geographies, preventing initial cut failures.
+    initial_partition = Partition(
+        graph,
+        assignment=recursive_tree_part(graph, range(NUM_DISTRICTS), ideal_population, POPULATION_COLUMN, 0.05),
+        updaters=updaters
+    )
 
-# Define the proposal method (how to change the map at each step)
-proposal = partial(recom,
-                   pop_col=POPULATION_COLUMN,
-                   pop_target=ideal_population,
-                   epsilon=0.02,
-                   node_repeats=1)
+    # Define the proposal method (how to change the map at each step)
+    proposal = partial(recom,
+                       pop_col=POPULATION_COLUMN,
+                       pop_target=ideal_population,
+                       epsilon=0.02, # The main simulation is still strict
+                       node_repeats=1)
 
-# Define constraints (rules for valid maps)
-constraints = [
-    within_percent_of_ideal_population(initial_partition, 0.02)
-]
+    # Define constraints (rules for valid maps)
+    constraints = [
+        within_percent_of_ideal_population(initial_partition, 0.02)
+    ]
 
-# Create the main Markov Chain object
-chain = MarkovChain(
-    proposal=proposal,
-    constraints=constraints,
-    accept=always_accept,
-    initial_state=initial_partition,
-    total_steps=TOTAL_STEPS
-)
+    # Create the main Markov Chain object
+    chain = MarkovChain(
+        proposal=proposal,
+        constraints=constraints,
+        accept=always_accept,
+        initial_state=initial_partition,
+        total_steps=TOTAL_STEPS
+    )
 
-print("Configuration complete.")
+    # --- 6. Run the Simulation ---
 
+    print(f"\nRunning simulation for {TOTAL_STEPS} steps...")
+    partitions = []
+    compactness_scores = []
 
-# --- 6. Run the Simulation ---
+    polsby_popper_updater = polsby_popper
 
-print(f"\nRunning simulation for {TOTAL_STEPS} steps...")
-partitions = []
-compactness_scores = []
+    for i, partition in enumerate(chain):
+        partitions.append(partition)
+        scores = polsby_popper_updater(partition)
+        compactness_scores.append(np.mean(list(scores.values())))
+        
+        if (i + 1) % 100 == 0:
+            print(f"Step {i+1}/{TOTAL_STEPS} complete.")
 
-# Polsby-Popper is a standard measure of district shape compactness
-polsby_popper_updater = polsby_popper
+    print("Simulation finished.")
 
-for i, partition in enumerate(chain):
-    partitions.append(partition)
-    # Calculate and store the average compactness for the whole map
-    scores = polsby_popper_updater(partition)
-    compactness_scores.append(np.mean(list(scores.values())))
-    
-    # Print progress update
-    if (i + 1) % 100 == 0:
-        print(f"Step {i+1}/{TOTAL_STEPS} complete.")
+    # --- 7. Analyze the Results to Find the Best Map ---
+    print("\nAnalyzing results to find the most typical and compact map...")
 
-print("Simulation finished.")
+    district_assignments = {node: [] for node in graph.nodes}
+    for part in partitions:
+        for node, district in part.assignment.items():
+            district_assignments[node].append(district)
 
+    summary_assignment = {node: max(set(counts), key=counts.count) for node, counts in district_assignments.items()}
 
-# --- 7. Analyze the Results to Find the Best Map ---
-# The "best" map is defined as the one that is most representative of the
-# entire ensemble of generated maps, balanced with having compact shapes.
+    min_score = float('inf')
+    best_partition = None
 
-print("\nAnalyzing results to find the most typical and compact map...")
+    for i, partition in enumerate(partitions):
+        deviation = 0
+        for node, district_id in partition.assignment.items():
+            if district_id != summary_assignment[node]:
+                deviation += graph.nodes[node][POPULATION_COLUMN]
+        
+        normalized_deviation = deviation / total_population
+        score = normalized_deviation + (1 - compactness_scores[i])
 
-# Find the most common district assignment for each precinct across all partitions
-district_assignments = {node: [] for node in graph.nodes}
-for part in partitions:
-    for node, district in part.assignment.items():
-        district_assignments[node].append(district)
-
-summary_assignment = {node: max(set(counts), key=counts.count) for node, counts in district_assignments.items()}
-
-min_score = float('inf')
-best_partition = None
-
-# Score each partition based on its deviation from the summary map and its compactness
-for i, partition in enumerate(partitions):
-    deviation = 0
-    for node, district_id in partition.assignment.items():
-        if district_id != summary_assignment[node]:
-            deviation += graph.nodes[node][POPULATION_COLUMN]
-    
-    normalized_deviation = deviation / total_population
-    # Score = deviation (lower is better) + (1 - compactness) (lower is better)
-    score = normalized_deviation + (1 - compactness_scores[i])
-
-    if score < min_score:
-        min_score = score
-        best_partition = partition
-
-# Assign the final district IDs to the GeoDataFrame
-df['best_cd'] = df.index.map(best_partition.assignment)
+        if score < min_score:
+            min_score = score
+            best_partition = partition
 
 
-# --- 8. Visualize and Save the Result ---
+# --- 8. Assign Final Districts and Save Results ---
+
+# Assign the final district IDs to the GeoDataFrame, adding 1 to make them 1-indexed for the map.
+df['best_cd'] = df.index.map(best_partition.assignment) + 1
+
+
+# --- 9. Visualize and Save the Result ---
 
 print("\nGenerating map visualization and data files...")
 
-# Dissolve the precincts into final district shapes
 districts = df.dissolve(by='best_cd')
 
-# Save the geographic data for the best map
 output_geojson = os.path.join(OUTPUT_DIR, f"{STATE_ABBR}_best_map.geojson")
 districts.to_file(output_geojson, driver="GeoJSON")
-print(f"Best map data saved to {output_geojson}")
+print(f"Best map saved to {output_geojson}")
 
-# Create and save the map image
 fig, ax = plt.subplots(1, 1, figsize=(15, 10))
 districts.plot(
     column=districts.index,

@@ -173,11 +173,10 @@ if NUM_DISTRICTS == 1:
     best_partition = Partition(graph, assignment, updaters)
 else:
     # For multi-district states, create the initial partition using a recursive method.
-    # We use a slightly higher epsilon (5%) for the *initial* partition to make it
-    # more robust for complex geographies, preventing initial cut failures.
+    # --- FIX: Ensure the initial partition meets the same strictness as the constraint ---
     initial_partition = Partition(
         graph,
-        assignment=recursive_tree_part(graph, range(NUM_DISTRICTS), ideal_population, POPULATION_COLUMN, 0.05),
+        assignment=recursive_tree_part(graph, range(NUM_DISTRICTS), ideal_population, POPULATION_COLUMN, 0.02),
         updaters=updaters
     )
 

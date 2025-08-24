@@ -173,7 +173,6 @@ if NUM_DISTRICTS == 1:
     best_partition = Partition(graph, assignment, updaters)
 else:
     # For multi-district states, create the initial partition using a recursive method.
-    # --- FIX: Ensure the initial partition meets the same strictness as the constraint ---
     initial_partition = Partition(
         graph,
         assignment=recursive_tree_part(graph, range(NUM_DISTRICTS), ideal_population, POPULATION_COLUMN, 0.02),
@@ -262,23 +261,25 @@ output_geojson = os.path.join(OUTPUT_DIR, f"{STATE_ABBR}_best_map.geojson")
 districts.to_file(output_geojson, driver="GeoJSON")
 print(f"Best map saved to {output_geojson}")
 
-fig, ax = plt.subplots(1, 1, figsize=(15, 10))
+# --- FIX: Improved plotting section for cleaner visuals ---
+fig, ax = plt.subplots(1, 1, figsize=(15, 15)) # Use a square figure for better aspect ratio
 districts.plot(
     column=districts.index,
-    cmap="tab20",
+    cmap="tab20",  # A good colormap for categorical data
     ax=ax,
     categorical=True,
     edgecolor="black",
-    legend=True,
-    legend_kwds={'title': "District", 'bbox_to_anchor': (1, 1)}
+    # The legend is removed as it's impractical for states with many districts (like CA's 52)
+    # and causes the visual clutter you observed.
+    legend=False
 )
 
-ax.set_title(f"Most Typical & Compact Map for {STATE_ABBR} from {TOTAL_STEPS} Simulations", fontsize=16)
+ax.set_title(f"Most Representative & Compact Map for {STATE_ABBR}", fontsize=20, pad=20)
 ax.set_axis_off()
 plt.tight_layout()
 
 output_image = os.path.join(OUTPUT_DIR, f"{STATE_ABBR}_summary_map.png")
-plt.savefig(output_image, dpi=300)
+plt.savefig(output_image, dpi=300, bbox_inches='tight') # Use bbox_inches='tight' to remove extra whitespace
 print(f"Map image saved to {output_image}")
 
 print(f"\n--- Analysis for {STATE_ABBR} complete. ---")
